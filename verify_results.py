@@ -1,3 +1,10 @@
+# mike mommsen
+# script to verify that cross table totals are accurate
+# if two tables both have total population they should equal each other, so thats what we test here
+# along with other easy tests across tables
+
+# enjoy
+# imports
 import sys
 import json
 import leveldb
@@ -11,6 +18,7 @@ from collections import Counter
 from create_universes import zerodiv
 
 def loadschema(indb):
+    """"""
     inschema = indb + '.schema'
     f = open(inschema)
     output = json.load(f)
@@ -18,9 +26,11 @@ def loadschema(indb):
     return output
 
 def loaddata(data, schema):
+    """return data fron json list into python dict using schema keys"""
     return {k: v for k, v in izip(schema, json.loads(data))}
 
 def testcrosstablerule(indata, ruledict):
+    """function to test a sungle rule for a single row. called by testcrosstablerow"""
     errors = []
     if type(ruledict['total']) == list:
         totals = [indata[x] for x in ruledict['total']]
@@ -67,6 +77,7 @@ def testcrosstablerule(indata, ruledict):
     return errors, total
 
 def testcrosstablerow(indata, crosstablerules):
+    """function to test a single row of data (a block) and spit each rule to testcrosstablerule"""
     # this is the part to test each rule on its own
     errorcounter = defaultdict(Counter)
     totaldict = {}
@@ -100,6 +111,7 @@ def testcrosstablerow(indata, crosstablerules):
     return errorcounter
 
 def testcrosstable(indatabase, schema, crosstablerules):
+    """function to iterate over database and feed rows to testcrosstablerow"""
     db = leveldb.LevelDB(indatabase)
     count = 0
     outdict = None
@@ -117,34 +129,52 @@ def testcrosstable(indatabase, schema, crosstablerules):
             break
 
 def testrule(indata, total, components, table):
+    """function to test a single rule"""
+    # first we try to grab the total
     try:
         valtotal = indata[total]
+    # if we cant then print out why and exit 
     except KeyError:
-        print indata.keys()
+        print indata.keys(), total
+        sys.exit(1)
+    # grab the components from the rowdictionary
     valcomps = {c: indata[c] for c in components}
+    # find out how many components there are
     lengthcomps = len(components)
+    # turn the valtotal into a string so we dont need to worry about rounding errors
     strvaltotal = '{0:.10f}'.format(valtotal)
+    # take the sum of the components
     valsumcomps = sum(valcomps.values())
+    # and turn that into a string for easy comparison
     strvalsumcomps = '{0:.10f}'.format(valsumcomps)
+    # valtotalmult is a test to see if each comp == valtotal, which seems like a specialized error to me
     valtotalmult = valtotal * lengthcomps
+    # and then we turn that into a string
     strvaltotalmult = '{0:.10f}'.format(valtotalmult)
+    # give ourself a 5% margin of error. 
+    # results from this are no different then the 10 decimal point rounding
     if (valtotal * 1.06) >= valsumcomps >= (valtotal * .95):
+        # valtotal == 0 is a special case because it doesnt prove that we did the math right, just that we had zeroes
         if strvaltotal == '{0:.10f}'.format(0):
             result = 'zero success'
+        # but if it is not zero we can count it as a real success
         else:
             result = 'success'
+    # but if we have an error
     else:
         #if strvaltotalmult == strvalsumcomps:
             #result = 'mult'
         #else:
         result = 'error'
     #print total, valtotal, valsumcomps, result
+    # we used to print out here, but we print out at the higher function now so we can aggregate results into a nice readable format
     if False:#result == 'error':
         zerocomps = [k for k, v in valcomps.iteritems() if v==0]
         print table, total, result, strvaltotal, valcomps, strvalsumcomps
     return result, valtotal, valcomps
 
 def testrow(data, methoddict, verify_rules):
+    """"""
     outdict = defaultdict(Counter)
     for table, method in methoddict.items():
 
@@ -156,6 +186,9 @@ def testrow(data, methoddict, verify_rules):
     return outdict
 
 def fixrow(data, key, methoddict, verify_rules, equationdict, originaldata):
+    """function that i wrote to fix rows that were causing problems after results were created.
+    after i did this it was clearly a problem because i had no way of knowing what caused the error.
+    because of this i reworked ther interpolation script to allow for fixes in there rather than after the fact"""
     originaldata = {k: v for k, v in chain(originaldata['blockdata'].items(), originaldata['tractdata'].items())}
     def subber(matchobject):
         return '{:d}'.format(originaldata[matchobject.group(0)])
@@ -180,25 +213,41 @@ def fixrow(data, key, methoddict, verify_rules, equationdict, originaldata):
     return data
 
 def testdata(indatabase, schema, methoddict, verify_rules, equationdict):
+    """function for testing within table errors.
+    these are errors like male + female != total for example.
+    it only verifies that these totals work, not that they are accurate results, just that the hierarchy for the table is being followed"""
+    # set outdict to None
     outdict = None
+    # blank list
     mylist = []
+    # open up the input database ( which is the output from interpolation ( why verify anything else))
     db = leveldb.LevelDB(indatabase)
+    # start our counter at zero
     count = 0
+    # loop through the database
     for key, value in db.RangeIter():
-        #print 'blkkey', key
+        # add to the counter
         count += 1
+        # load the data using the loaddata function
         data = loaddata(value, schema)
+        # if its not the first time through then we add the new data to the old data
+        # i wonder if collections.Counter would make this a lot easier
         if outdict:
             newdata = testrow(data, methoddict, verify_rules)
             outdict = {i: outdict[i] + newdata[i] for i in outdict}
+        # if it is the first time through then we just make the dictionary
         else:
             outdict = testrow(data, methoddict, verify_rules)
+        # when we get to a count we like (10k seemed appropro) we print out results
         if count == 10000:
             #print sorted(set([k[0] for k in outdict]))
+            # create a dictionary that only has errors in it
             outdict = OrderedDict([('{0}_av{1}'.format(k[0], k[1]), v) for k,v in sorted(outdict.items()) if 'error' in v or 'mult' in v])
+            # loop through the dictionary and format it 
             for k, v in outdict.items():
                 comp = verify_rules[str(methoddict['_'.join(k.split('_')[:2])])][k.split('_')[-1][2:]]
                 outdict[k]['components'] = ['_'.join(k.split('_')[:2]) + '_av' + c for c in comp]
+            # print the output in json because that is nicer to look at
             print json.dumps(outdict, indent=4)
             break
     return mylist
@@ -263,6 +312,9 @@ import sympy
 from sympy import var
 
 def solveequations(verifyrules, equationdict, methoddict):
+    """this was a function to try and solve equations symolically to see where problems were occuring
+    as you can imagine this did not work
+    this function does not belong in this script, but hey we arent perfect"""
     eqs = ' '.join(equationdict.values())
     variables = re.findall(FINDVARIABLES, eqs)
     print verifyrules
